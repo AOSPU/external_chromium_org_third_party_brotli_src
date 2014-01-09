@@ -122,18 +122,30 @@ void StoreHuffmanTreeOfHuffmanTreeToBitMask(
   };
   // Throw away trailing zeros:
   int codes_to_store = kCodeLengthCodes;
-  for (; codes_to_store > 3; --codes_to_store) {
+  for (; codes_to_store > 0; --codes_to_store) {
     if (code_length_bitdepth[kStorageOrder[codes_to_store - 1]] != 0) {
       break;
     }
   }
-  WriteBits(4, codes_to_store - 3, storage_ix, storage);
-  const int skip_two_first =
-      code_length_bitdepth[kStorageOrder[0]] == 0 &&
-      code_length_bitdepth[kStorageOrder[1]] == 0;
-  WriteBits(1, skip_two_first, storage_ix, storage);
-
-  for (int i = skip_two_first * 2; i < codes_to_store; ++i) {
+  int num_codes = 0;
+  for (int i = 0; i < codes_to_store; ++i) {
+    if (code_length_bitdepth[kStorageOrder[i]] != 0) {
+      ++num_codes;
+    }
+  }
+  if (num_codes == 1) {
+    codes_to_store = kCodeLengthCodes;
+  }
+  int skip_some = 0;  // skips none.
+  if (code_length_bitdepth[kStorageOrder[0]] == 0 &&
+      code_length_bitdepth[kStorageOrder[1]] == 0) {
+    skip_some = 2;  // skips two.
+    if (code_length_bitdepth[kStorageOrder[2]] == 0) {
+      skip_some = 3;  // skips three.
+    }
+  }
+  WriteBits(2, skip_some, storage_ix, storage);
+  for (int i = skip_some; i < codes_to_store; ++i) {
     uint8_t len[] = { 2, 4, 3, 2, 2, 4 };
     uint8_t bits[] = { 0, 5, 1, 3, 2, 13 };
     int v = code_length_bitdepth[kStorageOrder[i]];
@@ -174,7 +186,7 @@ void StoreHuffmanCode(const EntropyCode<kSize>& code, int alphabet_size,
   }
   if (code.count_ == 0) {   // emit minimal tree for empty cases
     // bits: small tree marker: 1, count-1: 0, max_bits-sized encoding for 0
-    WriteBits(3 + max_bits, 0x01, storage_ix, storage);
+    WriteBits(4 + max_bits, 0x1, storage_ix, storage);
     return;
   }
   if (code.count_ <= 4) {
@@ -194,7 +206,7 @@ void StoreHuffmanCode(const EntropyCode<kSize>& code, int alphabet_size,
       }
     }
     // Small tree marker to encode 1-4 symbols.
-    WriteBits(1, 1, storage_ix, storage);
+    WriteBits(2, 1, storage_ix, storage);
     WriteBits(2, code.count_ - 1, storage_ix, storage);
     for (int i = 0; i < code.count_; ++i) {
       WriteBits(max_bits, symbols[i], storage_ix, storage);
@@ -211,8 +223,6 @@ void StoreHuffmanCode(const EntropyCode<kSize>& code, int alphabet_size,
     }
     return;
   }
-  WriteBits(1, 0, storage_ix, storage);
-
   uint8_t huffman_tree[kSize];
   uint8_t huffman_tree_extra_bits[kSize];
   int huffman_tree_size = 0;
@@ -229,40 +239,8 @@ void StoreHuffmanCode(const EntropyCode<kSize>& code, int alphabet_size,
   EntropyCode<kCodeLengthCodes> huffman_tree_entropy;
   BuildEntropyCode(huffman_tree_histogram, 5, kCodeLengthCodes,
                    &huffman_tree_entropy);
-  Histogram<kCodeLengthCodes> trimmed_histogram = huffman_tree_histogram;
-  uint8_t* last_code = &huffman_tree[huffman_tree_size - 1];
-  while (*last_code == 0 || *last_code >= 17) {
-    trimmed_histogram.Remove(*last_code--);
-  }
-  int trimmed_size = trimmed_histogram.total_count_;
-  bool write_length = false;
-  if (trimmed_size >= 4 && trimmed_size <= 195 &&
-      trimmed_size < huffman_tree_size) {
-    EntropyCode<kCodeLengthCodes> trimmed_entropy;
-    BuildEntropyCode(trimmed_histogram, 5, kCodeLengthCodes, &trimmed_entropy);
-    int huffman_bit_cost = HuffmanTreeBitCost(huffman_tree_histogram,
-                                              huffman_tree_entropy);
-    int trimmed_bit_cost = HuffmanTreeBitCost(trimmed_histogram,
-                                              trimmed_entropy);;
-    trimmed_bit_cost += (trimmed_size < 68 ? 7 : 8);
-    if (trimmed_bit_cost < huffman_bit_cost) {
-      write_length = true;
-      huffman_tree_size = trimmed_size;
-      huffman_tree_entropy = trimmed_entropy;
-    }
-  }
-
   StoreHuffmanTreeOfHuffmanTreeToBitMask(
       &huffman_tree_entropy.depth_[0], storage_ix, storage);
-  WriteBits(1, write_length, storage_ix, storage);
-  if (write_length) {
-    WriteBits(1, huffman_tree_size >= 68, storage_ix, storage);
-    if (huffman_tree_size < 68) {
-      WriteBits(6, huffman_tree_size - 4, storage_ix, storage);
-    } else {
-      WriteBits(7, huffman_tree_size - 68, storage_ix, storage);
-    }
-  }
   StoreHuffmanTreeToBitMask(&huffman_tree[0], &huffman_tree_extra_bits[0],
                             huffman_tree_size, huffman_tree_entropy,
                             storage_ix, storage);
@@ -322,9 +300,13 @@ void ComputeDistanceShortCodes(std::vector<Command>* cmds,
     int cur_dist = (*cmds)[i].copy_distance_;
     if (cur_dist == 0) break;
     int dist_code = cur_dist + 16;
+    int limits[16] = { 0, 4, 10, 11,
+                       6, 6, 11, 11,
+                       11, 11, 11, 11,
+                       12, 12, 12, 12 };
     for (int k = 0; k < 16; ++k) {
       // Only accept more popular choices.
-      if (cur_dist < 11 && ((k >= 2 && k < 4) || k >= 6)) {
+      if (cur_dist < limits[k]) {
         // Typically unpopular ranges, don't replace a short distance
         // with them.
         continue;
